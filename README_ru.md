@@ -4,13 +4,9 @@
 
 Современная реплика классического тестера скорости чтения диска на Python/Tkinter. Последовательно читает все файлы в дереве каталогов и показывает скорость чтения по файлу и общую.
 
-## Скриншоты
+### Скриншоты
 
-1995:
-![FileScan32 1.06](img/filescan32.png)
-2026:
 ![FileScan64](img/filescan64.png)
-
 
 
 ### Возможности
@@ -47,6 +43,7 @@ Built date: Wed Oct 4 17:13:46 1995
 Copyright 1995 Jack Naoumov, Jack_N@MSN.com.
 All rights reserved. This product is freeware.
 ```
+![FileScan32 1.06](img/filescan32.png)
 
 ## Лицензия
 

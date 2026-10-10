@@ -1,4 +1,6 @@
+#!/usr/bin/env python3
 import os
+import stat
 import time
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, ttk
@@ -7,7 +9,7 @@ import threading
 # ============================ МЕТА ============================
 
 NAME    = "Filescan64"
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 AUTHOR  = "antony3d"
 
 # ============================ ОКНО ============================
@@ -35,6 +37,45 @@ def human_time(seconds):
     if m > 0:
         return f"{m}m {s}s"
     return f"{s}s"
+
+# ============================ SKIP-ФИЛЬТРЫ ============================
+# Псевдо-ФС (Linux / macOS): чтение оттуда бессмысленно или опасно
+# (/proc/kcore — гигантский «псевдофайл», /proc/kmsg — блокирует чтение).
+# Обрезаем их из os.walk, чтобы даже не спускаться внутрь.
+# Проверка только по абсолютному префиксу: папка ~/dev или ~/proc
+# обычного пользователя под фильтр НЕ попадает.
+
+SKIP_FS_PREFIXES = ("/proc", "/sys", "/dev")
+
+def _is_under_skip_prefix(path):
+    """True, если путь внутри псевдо-ФС. На Windows всегда False."""
+    if os.name != "posix":
+        return False
+    try:
+        abs_p = os.path.abspath(path)
+    except Exception:
+        return False
+    for prefix in SKIP_FS_PREFIXES:
+        try:
+            if os.path.commonpath([abs_p, prefix]) == prefix:
+                return True
+        except Exception:
+            continue
+    return False
+
+def stat_regular_size(path):
+    """Размер файла, если это обычный файл. Иначе None.
+
+    Один os.stat вместо getsize + open: заодно отсекает FIFO,
+    сокеты, device-ноды и битые симлинки — чтение таких файлов
+    вешало бы скан навсегда."""
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return st.st_size
 
 class FileScanApp:
     def __init__(self, root):
@@ -181,6 +222,9 @@ class FileScanApp:
             self.path_entry.insert(0, os.path.normpath(folder))
 
     def start_scan(self):
+        if self.scanning:
+            self.log_message("Scan already running.")
+            return
         target = self.path_entry.get().strip()
         if not target or not os.path.exists(target):
             self.log_message("ERROR: Invalid target path.")
@@ -193,10 +237,21 @@ class FileScanApp:
         self.btn_browse.config(state="disabled")
         self.chk_global.config(state="disabled")
         self.log_area.delete("1.0", tk.END)
-        self.log_message(f"{NAME} v{VERSION} — by {AUTHOR}")
         self.log_message(f"Starting scan for: {target}")
 
-        threading.Thread(target=self.scan_worker, args=(target,), daemon=True).start()
+        threading.Thread(target=self._scan_wrapper, args=(target,), daemon=True).start()
+
+    def _scan_wrapper(self, target_dir):
+        """Обёртка воркера: гарантирует восстановление кнопок.
+
+        scan_worker может упасть (TclError, OSError, ...). Без finally
+        кнопки остались бы disabled и приложение выглядело бы повешенным."""
+        try:
+            self.scan_worker(target_dir)
+        except Exception as e:
+            self.log_message(f"FATAL worker error: {str(e)}")
+        finally:
+            self._finish_scan(aborted=self.stop_requested)
 
     def stop_scan(self):
         if self.scanning:
@@ -300,18 +355,31 @@ class FileScanApp:
         for root_path, dirs, files in os.walk(target_dir):
             if self.stop_requested:
                 break
+            # Псевдо-ФС режем молча (лог — в основном цикле, чтобы не двоить)
+            dirs[:] = [d for d in dirs
+                       if not _is_under_skip_prefix(os.path.join(root_path, d))]
             for f in files:
+                # П.4: раньше флаг проверялся только во внешнем цикле —
+                # каталог-миллионник нельзя было остановить
+                if self.stop_requested:
+                    break
                 fp = os.path.join(root_path, f)
-                try:
-                    total_size += os.path.getsize(fp)
-                    file_count += 1
-                except Exception:
-                    pass
+                size = stat_regular_size(fp)
+                if size is None:
+                    continue
+                total_size += size
+                file_count += 1
         return total_size, file_count
 
     # ============================ Основной цикл сканирования ============================
 
     def scan_worker(self, target_dir):
+        # Явная цель внутри псевдо-ФС — не сканируем, выходим через
+        # _scan_wrapper/finally (кнопки восстановятся там)
+        if _is_under_skip_prefix(target_dir):
+            self.log_message(f"WARNING: pseudo-filesystem target skipped: {target_dir}")
+            return
+
         total_bytes = 0
         file_count = 0
         folder_count = 0
@@ -329,7 +397,6 @@ class FileScanApp:
                 f"({tree_total_size / 1024 / 1024 / 1024:.2f} GB), pre-scan took {pre_time:.1f}s"
             )
             if self.stop_requested:
-                self._finish_scan(aborted=True)
                 return
         else:
             self._show_tree_progress(False)
@@ -342,6 +409,10 @@ class FileScanApp:
             if self.stop_requested:
                 break
 
+            skipped = self._prune_dirs(root_path, dirs)
+            for s in skipped:
+                self.log_message(f"Skipped pseudo-fs dir: {s}")
+
             folder_count += len(dirs)
 
             for file in files:
@@ -349,15 +420,16 @@ class FileScanApp:
                     break
 
                 file_path = os.path.join(root_path, file)
+                # Спецфайлы (FIFO, сокеты, device-ноды, битые симлинки)
+                # пропускаем молча: open/read на них виснет навсегда
+                file_size = stat_regular_size(file_path)
+                if file_size is None:
+                    continue
                 file_count += 1
 
                 display_path = file_path if len(file_path) < 75 else "..." + file_path[-72:]
                 self.lbl_current_file.config(text=display_path)
 
-                try:
-                    file_size = os.path.getsize(file_path)
-                except Exception:
-                    file_size = 0
                 is_large = file_size > LARGE_FILE_THRESHOLD
                 show_progress_bar = file_size > PROGRESS_FILE_MIN
 
@@ -428,7 +500,19 @@ class FileScanApp:
         # Скрываем прогрессбар файла после завершения
         self._show_file_progress(False)
 
-        self._finish_scan(aborted=self.stop_requested)
+    def _prune_dirs(self, root_path, dirs):
+        """Выкидывает псевдо-ФС из обхода (in-place для os.walk).
+        Возвращает список пропущенных путей для лога."""
+        kept = []
+        skipped = []
+        for d in dirs:
+            full = os.path.join(root_path, d)
+            if _is_under_skip_prefix(full):
+                skipped.append(full)
+            else:
+                kept.append(d)
+        dirs[:] = kept
+        return skipped
 
     def _finish_scan(self, aborted):
         self.scanning = False

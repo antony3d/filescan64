@@ -4,11 +4,8 @@
 
 Modern Python/Tkinter reimplementation of the classic disk read-speed tester. Sequentially reads every file in a folder tree and reports per-file and global throughput.
 
-## Screenshots
+### Screenshots
 
-1995:
-![FileScan32 1.06](img/filescan32.png)
-2026:
 ![FileScan64](img/filescan64.png)
 
 
@@ -47,6 +44,8 @@ Built date: Wed Oct 4 17:13:46 1995
 Copyright 1995 Jack Naoumov, Jack_N@MSN.com.
 All rights reserved. This product is freeware.
 ```
+
+![FileScan32 1.06](img/filescan32.png)
 
 ## License
 
