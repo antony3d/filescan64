@@ -1,0 +1,14 @@
+# deny all
+/*
+
+# allow
+
+!filescan64.py
+
+!.gitignore
+!README.md
+!README_ru.md
+!LICENSE
+!img/
+!img/*
+
